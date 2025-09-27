@@ -2,6 +2,7 @@
 #include <string>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 /* You will have to add includes here */
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -12,237 +13,166 @@
 
 // Enable if you want debugging to be printed, see examble below.
 // Alternative, pass CFLAGS=-DDEBUG to make, make CFLAGS=-DDEBUG
-#define DEBUG
+// #define DEBUG
 
 // Included to get the support library
 #include <calcLib.h>
 #include "protocol.h"
 
-#define BUFFER_SIZE 4096
+#define MAXBUF 1500   // fits UDP packet
+#define TIMEOUT 2     // seconds
+#define RETRIES 3
 
-int main(int argc, char *argv[])
-{
-  /*
-    Read first input, assumes <ip>:<port> syntax, convert into one string (Desthost) and one integer (port).
-     Atm, works only on dotted notation, i.e. IPv4 and DNS. IPv6 does not work if its using ':'.
-  */
-  char delim_address[] = ":";
-  char *Desthost = strtok(argv[1], delim_address);
-  char *Destport = strtok(NULL, delim_address);
-  int destination_port = atoi(Destport);
-  // *Desthost now points to a string holding whatever came before the delimiter, ':'.
-  // *Dstport points to whatever string came after the delimiter.
+// simple wrapper for sending with retransmissions
+ssize_t send_with_retry(int sock, void *msg, size_t msglen,
+                        struct sockaddr *server, socklen_t slen,
+                        void *reply, size_t replylen) {
+    for (int attempt = 0; attempt < RETRIES; attempt++) {
+        sendto(sock, msg, msglen, 0, server, slen);
 
-  /* Do magic */
-  // int port = atoi(Destport);
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(sock, &fds);
+        struct timeval tv = {TIMEOUT, 0};
+        int rv = select(sock+1, &fds, NULL, NULL, &tv);
 
-  printf("Host %s, and port %s.\n", Desthost, Destport);
+        if (rv > 0) {
+            ssize_t n = recvfrom(sock, reply, replylen, 0, NULL, NULL);
+            return n;
+        }
+        #ifdef DEBUG
+        fprintf(stderr, "Timeout, retransmitting (%d)\n", attempt+1);
+        #endif
+    }
+    return -1; // fail
+}
 
-  char buffer[BUFFER_SIZE];
-  memset(buffer, 0, sizeof(buffer));
-
-  struct sockaddr_in server_addr;
-
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(destination_port);
-
-  int internal_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (internal_socket < 0)
-  {
-    printf("Socket could not be created.\n");
-    return 1;
-  }
-
-  if (inet_pton(AF_INET, Desthost, &server_addr.sin_addr) < 0)
-  {
-    printf("Invalid address/ Address not supported \n");
-    return 2;
-  }
-
-  int connection = connect(internal_socket, (struct sockaddr *)&server_addr, sizeof(server_addr));
-  if (connection < 0)
-  {
-    printf("Connection Failed \n");
-    return 3;
-  }
-
-  struct calcMessage first_message;
-  first_message.type = htons(22);
-  first_message.message = htonl(0);
-  first_message.protocol = htons(17);
-  first_message.major_version = htons(1);
-  first_message.minor_version = htons(0);
-
-  for (int i = 0; i == 3; i++)
-  {
-  }
-
-  int sending = send(internal_socket, &first_message, sizeof(first_message), 0);
-  if (sending < 0)
-  {
-    printf("Could not send to server.\n");
-    return 4;
-  }
-
-  while (1)
-  {
-    int bytes_received = recv(internal_socket, buffer, sizeof(buffer), 0);
-    if (bytes_received < 0)
-    {
-      printf("No message received.\n");
-      close(internal_socket);
-      return 5;
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s host:port\n", argv[0]);
+        return 1;
     }
 
-    if (bytes_received == 0)
-    {
-      printf("Server closed.\n");
-      close(internal_socket);
-      return 0;
+    char delim_address[] = ":";
+    char *Desthost = strtok(argv[1], delim_address);
+    char *Destport = strtok(NULL, delim_address);
+    
+    if (!Desthost || !Destport) {
+        fprintf(stderr, "ERROR: bad address format, expected host:port\n");
+        return 1;
     }
 
-    if (bytes_received <= 10)
+    printf("Host %s, and port %s.\n", Desthost, Destport);
+
+    struct addrinfo hints;
+    struct addrinfo *server_addr;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+
+    int rv = getaddrinfo(Desthost, Destport, &hints, &server_addr);
+    if (rv != 0)
     {
-      printf("NOT OK RECEIVED\n");
-      close(internal_socket);
-      return 0;
+      fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+      printf("ERROR: RESOLVE ISSUE\n");
+      return 1;
     }
 
-    if (bytes_received > 10)
+    int internal_socket = socket(server_addr->ai_family, server_addr->ai_socktype, server_addr->ai_protocol);
+    if (internal_socket < 0)
     {
-      break;
-    }
-  }
-
-  struct calcProtocol *received_task = (struct calcProtocol *)buffer;
-  struct calcProtocol converted_task;
-  converted_task.type = ntohs(received_task->type);
-  converted_task.major_version = ntohs(received_task->major_version);
-  converted_task.minor_version = ntohs(received_task->minor_version);
-  converted_task.id = ntohl(received_task->id);
-  converted_task.arith = ntohl(received_task->arith);
-  converted_task.inValue1 = ntohl(received_task->inValue1);
-  converted_task.inValue2 = ntohl(received_task->inValue2);
-  converted_task.inResult = ntohl(received_task->inResult);
-  converted_task.flValue1 = received_task->flValue1;
-  converted_task.flValue2 = received_task->flValue2;
-  converted_task.flResult = received_task->flResult;
-
-#ifdef DEBUG
-  printf("I get here\n");
-  printf("Received int: %d %d %d\n", converted_task.arith, converted_task.inValue1, converted_task.inValue2);
-  printf("Received float: %d %f %f\n", converted_task.arith, converted_task.flValue1, converted_task.flValue2);
-#endif
-  bool it_was_float = false;
-
-  if (converted_task.arith > 4)
-  {
-    if (converted_task.arith == 5)
-    {
-      converted_task.flResult = converted_task.flValue1 + converted_task.flValue2;
+      perror("socket");
+      freeaddrinfo(server_addr);
+      return 2;
     }
 
-    else if (converted_task.arith == 6)
-    {
-      converted_task.flResult = converted_task.flValue1 - converted_task.flValue2;
+    // build initial calcMessage
+    struct calcMessage first_message;
+    memset(&first_message, 0, sizeof(first_message));
+    first_message.type = htons(22);
+    first_message.message = htonl(0);
+    first_message.protocol = htons(17);
+    first_message.major_version = htons(1);
+    first_message.minor_version = htons(0);
+
+    char buffer[MAXBUF];
+    ssize_t n = send_with_retry(internal_socket, &first_message, sizeof(first_message),
+                                server_addr->ai_addr, server_addr->ai_addrlen,
+                                buffer, sizeof(buffer));
+    if (n < 0) {
+        printf("No response from server.\n");
+        return 1;
     }
 
-    else if (converted_task.arith == 7)
-    {
-      converted_task.flResult = converted_task.flValue1 * converted_task.flValue2;
+    // check reply type
+    if (n == sizeof(struct calcMessage)) {
+        struct calcMessage *r = (struct calcMessage*)buffer;
+        if (ntohs(r->type) == 2 && ntohl(r->message) == 2) {
+            printf("Server says NOT OK, aborting.\n");
+            return 1;
+        } else {
+            printf("ERROR WRONG SIZE OR INCORRECT PROTOCOL\n");
+            return 1;
+        }
+    }
+    if (n != sizeof(struct calcProtocol)) {
+        printf("ERROR WRONG SIZE OR INCORRECT PROTOCOL\n");
+        return 1;
     }
 
-    else if (converted_task.arith == 8)
-    {
-      converted_task.flResult = converted_task.flValue1 / converted_task.flValue2;
+    struct calcProtocol *received_task = (struct calcProtocol*)buffer;
+    uint32_t arith = ntohl(received_task->arith);
+    int32_t i1 = ntohl(received_task->inValue1);
+    int32_t i2 = ntohl(received_task->inValue2);
+    double f1 = received_task->flValue1;
+    double f2 = received_task->flValue2;
+
+    char opname[8];
+    char result_str[64];
+    
+    if (arith >=1 && arith <=4) { // integer
+        int resval=0;
+        if (arith==1) { resval=i1+i2; strcpy(opname,"add"); }
+        else if (arith==2){ resval=i1-i2; strcpy(opname,"sub"); }
+        else if (arith==3){ resval=i1*i2; strcpy(opname,"mul"); }
+        else if (arith==4){ resval=i1/i2; strcpy(opname,"div"); }
+        printf("ASSIGNMENT: %s %d %d\n", opname, i1, i2);
+        snprintf(result_str,sizeof(result_str),"%d",resval);
+        received_task->inResult = htonl(resval);
+    } else { // float
+        double fres=0;
+        if (arith==5){ fres=f1+f2; strcpy(opname,"fadd"); }
+        else if (arith==6){ fres=f1-f2; strcpy(opname,"fsub"); }
+        else if (arith==7){ fres=f1*f2; strcpy(opname,"fmul"); }
+        else if (arith==8){ fres=f1/f2; strcpy(opname,"fdiv"); }
+        printf("ASSIGNMENT: %s %8.8g %8.8g\n", opname, f1, f2);
+        snprintf(result_str,sizeof(result_str),"%g",fres);
+        received_task->flResult = fres;
     }
 
-    it_was_float = true;
-  }
-
-  else
-  {
-    if (converted_task.arith == 1)
-    {
-      converted_task.inResult = converted_task.inValue1 + converted_task.inValue2;
+    // send solution back
+    n = send_with_retry(internal_socket, received_task, sizeof(*received_task),
+                        server_addr->ai_addr, server_addr->ai_addrlen,
+                        buffer, sizeof(buffer));
+    if (n < 0) {
+        printf("No response from server after sending result.\n");
+        return 1;
     }
 
-    else if (converted_task.arith == 2)
-    {
-      converted_task.inResult = converted_task.inValue1 - converted_task.inValue2;
+    if (n == sizeof(struct calcMessage)) {
+        struct calcMessage *r = (struct calcMessage*)buffer;
+        if (ntohl(r->message) == 1) {
+            printf("OK (myresult=%s)\n", result_str);
+        } else {
+            printf("NOT OK (myresult=%s)\n", result_str);
+        }
+    } else {
+        printf("ERROR WRONG SIZE OR INCORRECT PROTOCOL\n");
     }
 
-    else if (converted_task.arith == 3)
-    {
-      converted_task.inResult = converted_task.inValue1 * converted_task.inValue2;
-    }
-
-    else if (converted_task.arith == 4)
-    {
-      converted_task.inResult = converted_task.inValue1 / converted_task.inValue2;
-    }
-  }
-
-  char result_string[64];
-
-  if (it_was_float)
-  {
-    int rv = sprintf(result_string, "%.8g\n", converted_task.flResult);
-    if (rv < 0)
-    {
-      fprintf(stderr, "sprintf float: %s\n", gai_strerror(rv));
-      return 6;
-    }
-  }
-
-  else
-  {
-    int rv = sprintf(result_string, "%d\n", converted_task.inResult);
-    if (rv < 0)
-    {
-      fprintf(stderr, "sprintf int: %s\n", gai_strerror(rv));
-      return 7;
-    }
-  }
-
-  printf("I am sending: %s", result_string);
-  int bytes_sent = send(internal_socket, result_string, strlen(result_string), 0);
-  if (bytes_sent < 0)
-  {
-    printf("No message sent.\n");
     close(internal_socket);
-    return 8;
-  }
-
-  memset(buffer, 0, sizeof(buffer));
-
-  while (1)
-  {
-    int last_bytes_received = recv(internal_socket, buffer, sizeof(buffer), 0);
-    if (last_bytes_received < 0)
-    {
-      printf("No message received.\n");
-      close(internal_socket);
-      return 9;
-    }
-
-    if (last_bytes_received == 0)
-    {
-      printf("Server closed.\n");
-      break;
-    }
-
-    if (last_bytes_received > 0)
-    {
-      struct calcMessage *received_message = (struct calcMessage *)buffer;
-      int message = ntohl(received_message->message);
-
-      printf("Message: %d, Bytes: %d", message, last_bytes_received);
-      printf("%s (myresult=%s)\n", buffer, result_string);
-      break;
-    }
-  }
-
-  close(internal_socket);
-  return 0;
+    freeaddrinfo(server_addr);
+    return 0;
 }
