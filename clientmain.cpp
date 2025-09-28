@@ -117,62 +117,92 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-    if (n != sizeof(struct calcProtocol)) {
-        printf("ERROR WRONG SIZE OR INCORRECT PROTOCOL\n");
-        return 1;
-    }
+    else if (n == sizeof(struct calcProtocol)) {    
+        struct calcProtocol *received_task = (struct calcProtocol*)buffer;
 
-    struct calcProtocol *received_task = (struct calcProtocol*)buffer;
-    uint32_t arith = ntohl(received_task->arith);
-    int32_t i1 = ntohl(received_task->inValue1);
-    int32_t i2 = ntohl(received_task->inValue2);
-    double f1 = received_task->flValue1;
-    double f2 = received_task->flValue2;
+        uint16_t r_type = ntohs(received_task->type);
+        uint16_t r_major = ntohs(received_task->major_version);
+        uint16_t r_minor = ntohs(received_task->minor_version);
 
-    char opname[8];
-    char result_str[64];
-    
-    if (arith >=1 && arith <=4) { // integer
-        int resval=0;
-        if (arith==1) { resval=i1+i2; strcpy(opname,"add"); }
-        else if (arith==2){ resval=i1-i2; strcpy(opname,"sub"); }
-        else if (arith==3){ resval=i1*i2; strcpy(opname,"mul"); }
-        else if (arith==4){ resval=i1/i2; strcpy(opname,"div"); }
-        printf("ASSIGNMENT: %s %d %d\n", opname, i1, i2);
-        snprintf(result_str,sizeof(result_str),"%d",resval);
-        received_task->inResult = htonl(resval);
-    } else { // float
-        double fres=0;
-        if (arith==5){ fres=f1+f2; strcpy(opname,"fadd"); }
-        else if (arith==6){ fres=f1-f2; strcpy(opname,"fsub"); }
-        else if (arith==7){ fres=f1*f2; strcpy(opname,"fmul"); }
-        else if (arith==8){ fres=f1/f2; strcpy(opname,"fdiv"); }
-        printf("ASSIGNMENT: %s %8.8g %8.8g\n", opname, f1, f2);
-        snprintf(result_str,sizeof(result_str),"%g",fres);
-        received_task->flResult = fres;
-    }
-
-    // send solution back
-    n = send_with_retry(internal_socket, received_task, sizeof(*received_task),
-                        server_addr->ai_addr, server_addr->ai_addrlen,
-                        buffer, sizeof(buffer));
-    if (n < 0) {
-        printf("No response from server after sending result.\n");
-        return 1;
-    }
-
-    if (n == sizeof(struct calcMessage)) {
-        struct calcMessage *r = (struct calcMessage*)buffer;
-        if (ntohl(r->message) == 1) {
-            printf("OK (myresult=%s)\n", result_str);
-        } else {
-            printf("NOT OK (myresult=%s)\n", result_str);
+        if (r_type != 1 || r_major != 1 || r_minor != 0) {
+            printf("ERROR WRONG SIZE OR INCORRECT PROTOCOL\n");
+            return 1;
         }
-    } else {
+
+        uint32_t arith = ntohl(received_task->arith);
+        int32_t i1 = ntohl(received_task->inValue1);
+        int32_t i2 = ntohl(received_task->inValue2);
+        double f1 = received_task->flValue1;
+        double f2 = received_task->flValue2;
+            
+        struct calcProtocol reply;
+        memset(&reply, 0, sizeof(reply));
+
+        reply.type = htons(2);
+        reply.major_version = htons(1);
+        reply.minor_version = htons(0);
+        reply.id = htonl(ntohl(received_task->id));
+        reply.arith = htonl(arith);
+        reply.inValue1 = htonl(i1);
+        reply.inValue2 = htonl(i2);
+
+        char opname[8];
+        char result_str[64];
+        
+        if (arith >=1 && arith <=4) { // integer
+            int resval=0;
+            if (arith==1) { resval=i1+i2; strcpy(opname,"add"); }
+            else if (arith==2){ resval=i1-i2; strcpy(opname,"sub"); }
+            else if (arith==3){ resval=i1*i2; strcpy(opname,"mul"); }
+            else if (arith==4){ resval=i1/i2; strcpy(opname,"div"); }
+            printf("ASSIGNMENT: %s %d %d\n", opname, i1, i2);
+            snprintf(result_str,sizeof(result_str),"%d",resval);
+            reply.inResult = htonl(resval);
+        } else { // float
+            double fres=0;
+            if (arith==5){ fres=f1+f2; strcpy(opname,"fadd"); }
+            else if (arith==6){ fres=f1-f2; strcpy(opname,"fsub"); }
+            else if (arith==7){ fres=f1*f2; strcpy(opname,"fmul"); }
+            else if (arith==8){ fres=f1/f2; strcpy(opname,"fdiv"); }
+            printf("ASSIGNMENT: %s %8.8g %8.8g\n", opname, f1, f2);
+            snprintf(result_str, sizeof(result_str),"%8.8g",fres);
+            reply.flResult = fres;
+        }
+
+        // send solution back
+        n = send_with_retry(internal_socket, &reply, sizeof(reply),
+                            server_addr->ai_addr, server_addr->ai_addrlen,
+                            buffer, sizeof(buffer));
+        if (n < 0) {
+            printf("No response from server after sending result.\n");
+            return 1;
+        }
+
+        if (n >= sizeof(struct calcMessage)) {
+            struct calcMessage *r = (struct calcMessage*)buffer;
+            uint16_t t = ntohs(r->type);
+            uint32_t m = ntohl(r->message);
+
+            if (t == 2 && m == 1) {
+                printf("OK (myresult=%s)\n", result_str);
+            } else if (t == 2 && m == 2) {
+                printf("NOT OK (myresult=%s)\n", result_str);
+            } else {
+                printf("ERROR WRONG SIZE OR INCORRECT PROTOCOL\n");
+            }
+        } else {
+            printf("ERROR WRONG SIZE OR INCORRECT PROTOCOL\n");
+        }
+
+        close(internal_socket);
+        freeaddrinfo(server_addr);
+        return 0;
+
+    }
+    else {
         printf("ERROR WRONG SIZE OR INCORRECT PROTOCOL\n");
+        return 1;
     }
 
-    close(internal_socket);
-    freeaddrinfo(server_addr);
-    return 0;
+
 }
